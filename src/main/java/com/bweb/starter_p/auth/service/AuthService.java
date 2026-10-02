@@ -71,17 +71,19 @@ public class AuthService {
 
   public AuthResult login(LoginRequest request, String remoteAddress) {
     String email = normalizeEmail(request.email());
-    loginAttemptLimiter.acquire(remoteAddress, email);
+    loginAttemptLimiter.checkAllowed(remoteAddress, email);
     validatePasswordByteLength(request.password());
     try {
       authenticationManager.authenticate(
           UsernamePasswordAuthenticationToken.unauthenticated(email, request.password()));
     } catch (AuthenticationException exception) {
+      loginAttemptLimiter.recordFailure(remoteAddress, email);
       throw new BadCredentialsException("Invalid email or password");
     }
     UserAccount user = userRepository.findByEmail(email)
         .filter(UserAccount::isActive)
         .orElseThrow(() -> new BadCredentialsException("Invalid email or password"));
+    loginAttemptLimiter.clearEmailFailures(email);
     return transactionTemplate.execute(status -> issueTokens(user));
   }
 

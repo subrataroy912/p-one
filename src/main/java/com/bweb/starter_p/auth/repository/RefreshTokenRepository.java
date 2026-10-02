@@ -22,6 +22,10 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
 
   Optional<RefreshToken> findByTokenHashAndRevokedAtIsNull(String tokenHash);
 
+  Optional<RefreshToken> findByTokenHash(String tokenHash);
+
+  long countByUser_IdAndRevokedAtIsNull(UUID userId);
+
   @Modifying
   @Query("update RefreshToken token set token.revokedAt = :revokedAt "
       + "where token.user.id = :userId and token.revokedAt is null")

@@ -14,19 +14,32 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 public class LoginAttemptLimiter {
 
-  private static final int MAX_FAILED_ATTEMPTS = 5;
+  private static final int MAX_FAILED_ATTEMPTS_PER_EMAIL = 5;
+  private static final int MAX_FAILED_ATTEMPTS_PER_IP = 40;
   private static final Duration WINDOW = Duration.ofMinutes(15);
   private final Map<String, AttemptWindow> attempts = new HashMap<>();
 
-  public synchronized void acquire(String remoteAddress, String email) {
+  public synchronized void checkAllowed(String remoteAddress, String email) {
     Instant now = Instant.now();
     String ipKey = ipKey(remoteAddress);
     String emailKey = emailKey(email);
     if (isLimited(ipKey, now) || isLimited(emailKey, now)) {
       throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many login attempts");
     }
-    increment(ipKey, now);
-    increment(emailKey, now);
+  }
+
+  public synchronized void recordFailure(String remoteAddress, String email) {
+    Instant now = Instant.now();
+    increment(ipKey(remoteAddress), MAX_FAILED_ATTEMPTS_PER_IP, now);
+    increment(emailKey(email), MAX_FAILED_ATTEMPTS_PER_EMAIL, now);
+  }
+
+  public synchronized void clearEmailFailures(String email) {
+    attempts.remove(emailKey(email));
+  }
+
+  public synchronized void reset() {
+    attempts.clear();
   }
 
   @Scheduled(fixedDelay = 60000)
@@ -49,15 +62,15 @@ public class LoginAttemptLimiter {
       attempts.remove(key);
       return false;
     }
-    return window.count() >= MAX_FAILED_ATTEMPTS;
+    return window.count() >= window.maximumAttempts();
   }
 
-  private void increment(String key, Instant now) {
+  private void increment(String key, int maximumAttempts, Instant now) {
     AttemptWindow window = attempts.get(key);
     if (window == null || !window.expiresAt().isAfter(now)) {
-      attempts.put(key, new AttemptWindow(1, now.plus(WINDOW)));
+      attempts.put(key, new AttemptWindow(1, now.plus(WINDOW), maximumAttempts));
     } else {
-      attempts.put(key, new AttemptWindow(window.count() + 1, window.expiresAt()));
+      attempts.put(key, new AttemptWindow(window.count() + 1, window.expiresAt(), maximumAttempts));
     }
   }
 
@@ -69,6 +82,6 @@ public class LoginAttemptLimiter {
     return "email:" + email;
   }
 
-  private record AttemptWindow(int count, Instant expiresAt) {
+  private record AttemptWindow(int count, Instant expiresAt, int maximumAttempts) {
   }
 }

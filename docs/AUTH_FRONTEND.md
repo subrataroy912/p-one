@@ -10,7 +10,7 @@ Set the frontend API base URL to the backend origin, without a trailing slash. F
 VITE_API_BASE_URL=http://localhost:8080
 ```
 
-For a local backend setup, copy `.env.example` to `.env`, set the database credentials and a private random `JWT_SECRET` of at least 32 bytes, and ensure the `starter_p` database exists. Schema changes are applied by Flyway; Hibernate validates the resulting schema at startup. For an existing database created before Flyway was added, verify that it matches migration V1, then baseline that database at version 1 with the Flyway CLI before starting the app. The app deliberately does not automatically baseline a non-empty schema.
+For a local backend setup, copy `.env.example` to `.env`, set the database credentials and a private random `JWT_SECRET` of at least 32 bytes, and ensure the `starter_p` database exists. Schema changes are applied by Flyway; Hibernate validates the resulting schema at startup. For a disposable local development database created before Flyway was added, drop and recreate the database, then let Flyway create the schema. Do not do this if the database contains data you need. For an existing/shared database, verify that it matches migration V1, then baseline it at version 1 with the Flyway CLI before starting the app. The app deliberately does not automatically baseline a non-empty schema.
 
 The backend must allow the exact frontend origin, including scheme and port. Local defaults allow `http://localhost:3000` and `http://localhost:5173`. For another port or a deployed frontend, set the backend environment variable:
 
@@ -176,7 +176,9 @@ function refreshSession() {
 }
 ```
 
-Login allows at most five attempts per client IP and normalized email in a 15-minute window; further attempts receive `429 Too Many Requests`. The limiter is in-memory and applies per application instance. When deployed behind a proxy, configure the server/proxy so the servlet remote address is the actual client IP; do not trust arbitrary forwarded-IP headers.
+Login allows at most five failed attempts per normalized email and 40 failed attempts per client IP in a 15-minute window; only failed authentication increments the counters, and successful authentication clears the email counter. Further attempts receive `429 Too Many Requests`. The email limit can temporarily lock out an account if an attacker deliberately submits repeated wrong passwords. The limiter is in-memory and applies per application instance. When deployed behind a proxy, configure the server/proxy so the servlet remote address is the actual client IP; do not trust arbitrary forwarded-IP headers.
+
+API errors use a consistent JSON shape: `{ "error": "message", "fields": {} }`. Validation errors include field-specific messages in `fields`; malformed JSON, unsupported methods, missing routes, and unexpected server errors use an empty `fields` object.
 
 `PATCH /v1/users/me` leaves a name unchanged when its field is omitted or `null`. Send an empty or whitespace-only string to clear a name.
 

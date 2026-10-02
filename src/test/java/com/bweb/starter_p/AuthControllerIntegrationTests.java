@@ -2,11 +2,14 @@ package com.bweb.starter_p;
 
 import java.util.UUID;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.Date;
 
 import jakarta.servlet.http.Cookie;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -20,6 +23,11 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import tools.jackson.databind.ObjectMapper;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+
+import com.bweb.starter_p.auth.repository.RefreshTokenRepository;
+import com.bweb.starter_p.auth.service.LoginAttemptLimiter;
+import com.bweb.starter_p.auth.entity.RefreshToken;
+import com.bweb.starter_p.user.repository.UserRepository;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
@@ -41,7 +49,18 @@ class AuthControllerIntegrationTests {
         private ObjectMapper objectMapper;
 
         @Autowired
-        private com.bweb.starter_p.user.repository.UserRepository userRepository;
+        private UserRepository userRepository;
+
+        @Autowired
+        private RefreshTokenRepository refreshTokenRepository;
+
+        @Autowired
+        private LoginAttemptLimiter loginAttemptLimiter;
+
+        @BeforeEach
+        void resetLoginAttempts() {
+                loginAttemptLimiter.reset();
+        }
 
         @Test
         void aliveEndpointIsPublic() throws Exception {
@@ -129,6 +148,60 @@ class AuthControllerIntegrationTests {
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}".formatted(email)))
                                 .andExpect(status().isTooManyRequests());
+
+                String otherEmail = "same-ip-" + UUID.randomUUID() + "@example.com";
+                mockMvc.perform(withCsrf(post("/v1/auth/register"), csrfCookie, csrfToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"StrongPassword123\"}"
+                                                .formatted(otherEmail)))
+                                .andExpect(status().isCreated());
+                mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                .with(request -> {
+                                        request.setRemoteAddr(clientIp);
+                                        return request;
+                                })
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"StrongPassword123\"}"
+                                                .formatted(otherEmail)))
+                                .andExpect(status().isOk());
+        }
+
+        @Test
+        void successfulLoginClearsEmailFailures() throws Exception {
+                String email = "clear-limit-" + UUID.randomUUID() + "@example.com";
+                MvcResult csrfResponse = mockMvc.perform(get("/v1/auth/csrf"))
+                                .andExpect(status().isOk())
+                                .andReturn();
+                Cookie csrfCookie = csrfResponse.getResponse().getCookie("XSRF-TOKEN");
+                String csrfToken = objectMapper.readTree(csrfResponse.getResponse().getContentAsString())
+                                .get("token").stringValue();
+                mockMvc.perform(withCsrf(post("/v1/auth/register"), csrfCookie, csrfToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"StrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isCreated());
+
+                for (int attempt = 0; attempt < 4; attempt++) {
+                        mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}"
+                                                        .formatted(email)))
+                                        .andExpect(status().isUnauthorized());
+                }
+                mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"StrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isOk());
+                for (int attempt = 0; attempt < 4; attempt++) {
+                        mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}"
+                                                        .formatted(email)))
+                                        .andExpect(status().isUnauthorized());
+                }
+                mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isUnauthorized());
         }
 
         @Test
@@ -193,7 +266,65 @@ class AuthControllerIntegrationTests {
 
                 mockMvc.perform(get("/v1/does-not-exist")
                                 .cookie(registration.getResponse().getCookie("accessToken")))
-                                .andExpect(status().isNotFound());
+                                .andExpect(status().isNotFound())
+                                .andExpect(jsonPath("$.error").value("Resource not found"))
+                                .andExpect(jsonPath("$.fields").isEmpty());
+        }
+
+        @Test
+        void malformedJsonAndUnsupportedMethodUseApiErrorShape() throws Exception {
+                MvcResult csrfResponse = mockMvc.perform(get("/v1/auth/csrf"))
+                                .andExpect(status().isOk())
+                                .andReturn();
+                Cookie csrfCookie = csrfResponse.getResponse().getCookie("XSRF-TOKEN");
+                String csrfToken = objectMapper.readTree(csrfResponse.getResponse().getContentAsString())
+                                .get("token").stringValue();
+
+                mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{not-json"))
+                                .andExpect(status().isBadRequest())
+                                .andExpect(jsonPath("$.error").value("Malformed or unreadable request body"))
+                                .andExpect(jsonPath("$.fields").isEmpty());
+
+                mockMvc.perform(get("/v1/auth/register"))
+                                .andExpect(status().isMethodNotAllowed())
+                                .andExpect(jsonPath("$.error").value("HTTP method not allowed"))
+                                .andExpect(jsonPath("$.fields").isEmpty());
+        }
+
+        @Test
+        void staleRefreshReplayRevokesAllActiveSessions() throws Exception {
+                String email = "stale-replay-" + UUID.randomUUID() + "@example.com";
+                MvcResult csrfResponse = mockMvc.perform(get("/v1/auth/csrf"))
+                                .andExpect(status().isOk())
+                                .andReturn();
+                Cookie csrfCookie = csrfResponse.getResponse().getCookie("XSRF-TOKEN");
+                String csrfToken = objectMapper.readTree(csrfResponse.getResponse().getContentAsString())
+                                .get("token").stringValue();
+                MvcResult registration = mockMvc.perform(withCsrf(post("/v1/auth/register"), csrfCookie, csrfToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"StrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isCreated())
+                                .andReturn();
+                String originalRefreshToken = registration.getResponse().getCookie("refreshToken").getValue();
+                var user = userRepository.findByEmail(email).orElseThrow();
+                RefreshToken originalStoredToken = refreshTokenRepository
+                                .findByTokenHash(hashToken(originalRefreshToken)).orElseThrow();
+                originalStoredToken.setRevokedAt(Instant.now().minusSeconds(60));
+                refreshTokenRepository.save(originalStoredToken);
+
+                mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"StrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isOk());
+                Assertions.assertEquals(1, refreshTokenRepository.countByUser_IdAndRevokedAtIsNull(user.getId()));
+
+                mockMvc.perform(withCsrf(post("/v1/auth/refresh"), csrfCookie, csrfToken)
+                                .cookie(new Cookie("refreshToken", originalRefreshToken)))
+                                .andExpect(status().isUnauthorized());
+
+                Assertions.assertEquals(0, refreshTokenRepository.countByUser_IdAndRevokedAtIsNull(user.getId()));
         }
 
         @Test
@@ -333,5 +464,10 @@ class AuthControllerIntegrationTests {
                         Cookie csrfCookie,
                         String csrfToken) {
                 return request.cookie(csrfCookie).header("X-XSRF-TOKEN", csrfToken);
+        }
+
+        private String hashToken(String token) throws Exception {
+                return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                                .digest(token.getBytes(StandardCharsets.UTF_8)));
         }
 }
