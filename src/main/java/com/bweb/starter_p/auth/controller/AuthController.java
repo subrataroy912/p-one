@@ -50,8 +50,11 @@ public class AuthController {
   }
 
   @PostMapping("/login")
-  public AuthResponse login(@Valid @RequestBody LoginRequest request, HttpServletResponse response) {
-    AuthResult result = authService.login(request);
+  public AuthResponse login(
+      @Valid @RequestBody LoginRequest request,
+      HttpServletRequest servletRequest,
+      HttpServletResponse response) {
+    AuthResult result = authService.login(request, servletRequest.getRemoteAddr());
     authCookieService.setAuthCookies(response, result);
     return result.response();
   }

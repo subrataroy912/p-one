@@ -21,7 +21,7 @@ public class RefreshTokenCleanupJob {
   @Scheduled(cron = "0 0 3 * * *")
   @Transactional
   public void deleteExpiredRefreshTokens() {
-    int deletedCount = refreshTokenRepository.deleteByExpiresAtBefore(Instant.now());
+    int deletedCount = refreshTokenRepository.deleteExpiredBefore(Instant.now());
     if (deletedCount > 0) {
       log.info("Deleted {} expired refresh tokens", deletedCount);
     }

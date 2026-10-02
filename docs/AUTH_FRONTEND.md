@@ -10,7 +10,7 @@ Set the frontend API base URL to the backend origin, without a trailing slash. F
 VITE_API_BASE_URL=http://localhost:8080
 ```
 
-For a local backend setup, copy `.env.example` to `.env`, set the database credentials and a private random `JWT_SECRET` of at least 32 bytes, and ensure the `starter_p` database exists. Schema changes are applied by Flyway; Hibernate validates the resulting schema at startup.
+For a local backend setup, copy `.env.example` to `.env`, set the database credentials and a private random `JWT_SECRET` of at least 32 bytes, and ensure the `starter_p` database exists. Schema changes are applied by Flyway; Hibernate validates the resulting schema at startup. For an existing database created before Flyway was added, verify that it matches migration V1, then baseline that database at version 1 with the Flyway CLI before starting the app. The app deliberately does not automatically baseline a non-empty schema.
 
 The backend must allow the exact frontend origin, including scheme and port. Local defaults allow `http://localhost:3000` and `http://localhost:5173`. For another port or a deployed frontend, set the backend environment variable:
 
@@ -160,8 +160,23 @@ if (response.status === 204) {
 }
 ```
 
-Refresh tokens rotate on successful refresh. Reuse of a rotated refresh cookie is rejected, so always let the browser accept the newest `Set-Cookie` response and do not cache refresh tokens in frontend code.
-If a known refresh token is replayed after rotation, all active refresh tokens for that account are revoked. Expired refresh-token records are removed daily.
+Refresh tokens rotate on successful refresh. Reuse of a rotated refresh cookie is rejected, so always let the browser accept the newest `Set-Cookie` response and do not cache refresh tokens in frontend code. If a refresh token was revoked within the last 20 seconds, replay is rejected but does not revoke the account's other sessions; older replays revoke all active refresh tokens for that account. Expired refresh-token records are removed daily.
+
+Coordinate refreshes in the frontend so parallel `401` responses share one in-flight refresh promise instead of sending multiple refresh requests:
+
+```js
+let refreshPromise;
+
+function refreshSession() {
+  if (!refreshPromise) {
+    refreshPromise = apiFetch("/v1/auth/refresh", { method: "POST" })
+      .finally(() => { refreshPromise = undefined; });
+  }
+  return refreshPromise;
+}
+```
+
+Login allows at most five attempts per client IP and normalized email in a 15-minute window; further attempts receive `429 Too Many Requests`. The limiter is in-memory and applies per application instance. When deployed behind a proxy, configure the server/proxy so the servlet remote address is the actual client IP; do not trust arbitrary forwarded-IP headers.
 
 `PATCH /v1/users/me` leaves a name unchanged when its field is omitted or `null`. Send an empty or whitespace-only string to clear a name.
 
@@ -181,6 +196,7 @@ If a known refresh token is replayed after rotation, all active refresh tokens f
 
 - `400 Bad Request`: request validation failed, such as an invalid email, a password shorter than 8 characters during registration, or a password exceeding BCrypt's 72-byte UTF-8 limit.
 - `401 Unauthorized`: invalid login credentials, invalid/expired refresh token, or missing/expired access authentication for a protected route.
+- `429 Too Many Requests`: login attempts exceeded the per-IP or per-email limit.
 - `403 Forbidden`: missing or invalid CSRF token on a state-changing request. Bootstrap again with `GET /v1/auth/csrf` and retry once if appropriate.
 - `409 Conflict`: registration email is already in use.
 - `201 Created`: registration succeeded; `200 OK`: login, refresh, or user read/update succeeded; `204 No Content`: logout succeeded.

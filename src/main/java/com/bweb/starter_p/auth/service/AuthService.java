@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.HexFormat;
 import java.util.UUID;
 
@@ -41,6 +42,9 @@ public class AuthService {
   private final PasswordEncoder passwordEncoder;
   private final JwtService jwtService;
   private final TransactionTemplate transactionTemplate;
+  private final LoginAttemptLimiter loginAttemptLimiter;
+
+  private static final Duration REFRESH_TOKEN_REPLAY_GRACE_PERIOD = Duration.ofSeconds(20);
 
   public AuthResult register(RegisterRequest request) {
     String email = normalizeEmail(request.email());
@@ -65,9 +69,10 @@ public class AuthService {
     });
   }
 
-  public AuthResult login(LoginRequest request) {
-    validatePasswordByteLength(request.password());
+  public AuthResult login(LoginRequest request, String remoteAddress) {
     String email = normalizeEmail(request.email());
+    loginAttemptLimiter.acquire(remoteAddress, email);
+    validatePasswordByteLength(request.password());
     try {
       authenticationManager.authenticate(
           UsernamePasswordAuthenticationToken.unauthenticated(email, request.password()));
@@ -101,7 +106,9 @@ public class AuthService {
         .filter(token -> token.getUser().getId().equals(parsedUserId))
         .orElseThrow(() -> new BadCredentialsException("Invalid refresh token"));
     if (storedToken.getRevokedAt() != null) {
-      refreshTokenRepository.revokeAllActiveForUser(parsedUserId, Instant.now());
+      if (storedToken.getRevokedAt().isBefore(Instant.now().minus(REFRESH_TOKEN_REPLAY_GRACE_PERIOD))) {
+        refreshTokenRepository.revokeAllActiveForUser(parsedUserId, Instant.now());
+      }
       throw new BadCredentialsException("Invalid refresh token");
     }
     if (!storedToken.getExpiresAt().isAfter(Instant.now())) {

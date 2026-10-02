@@ -1,7 +1,7 @@
 package com.bweb.starter_p.auth.repository;
 
-import java.util.Optional;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -27,5 +27,7 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
       + "where token.user.id = :userId and token.revokedAt is null")
   int revokeAllActiveForUser(@Param("userId") UUID userId, @Param("revokedAt") Instant revokedAt);
 
-  int deleteByExpiresAtBefore(Instant cutoff);
+  @Modifying
+  @Query("delete from RefreshToken token where token.expiresAt < :cutoff")
+  int deleteExpiredBefore(@Param("cutoff") Instant cutoff);
 }

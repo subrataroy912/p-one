@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -28,20 +29,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static org.hamcrest.Matchers.nullValue;
 
-@SpringBootTest(properties = {
-                "spring.datasource.url=jdbc:h2:mem:starter_p;MODE=MySQL;DB_CLOSE_DELAY=-1",
-                "spring.datasource.username=sa",
-                "spring.datasource.password=",
-                "spring.datasource.driver-class-name=org.h2.Driver",
-                "spring.jpa.hibernate.ddl-auto=create-drop",
-                "spring.flyway.enabled=false",
-                "app.jwt.secret=test-secret-key-that-is-long-enough-for-hmac-sha256",
-                "app.jwt.access-token-lifetime=15m",
-                "app.jwt.refresh-token-lifetime=7d",
-                "app.cors.allowed-origins=http://localhost:5173",
-                "app.security.cookie-secure=false",
-                "app.security.cookie-same-site=Lax"
-})
+@SpringBootTest
+@ActiveProfiles("test")
 @AutoConfigureMockMvc
 class AuthControllerIntegrationTests {
 
@@ -73,7 +62,9 @@ class AuthControllerIntegrationTests {
                 mockMvc.perform(withCsrf(post("/v1/auth/register"), csrfCookie, csrfToken)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"email\":\"not-an-email\",\"password\":\"StrongPassword123\"}"))
-                                .andExpect(status().isBadRequest());
+                                .andExpect(status().isBadRequest())
+                                .andExpect(jsonPath("$.error").value("Request validation failed"))
+                                .andExpect(jsonPath("$.fields.email").exists());
         }
 
         @Test
@@ -94,7 +85,50 @@ class AuthControllerIntegrationTests {
                 mockMvc.perform(withCsrf(post("/v1/auth/register"), csrfCookie, csrfToken)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(body))
-                                .andExpect(status().isConflict());
+                                .andExpect(status().isConflict())
+                                .andExpect(jsonPath("$.error").value("Email is already registered"));
+        }
+
+        @Test
+        void loginIsRateLimitedByIpAndEmail() throws Exception {
+                String email = "rate-limit-" + UUID.randomUUID() + "@example.com";
+                MvcResult csrfResponse = mockMvc.perform(get("/v1/auth/csrf"))
+                                .andExpect(status().isOk())
+                                .andReturn();
+                Cookie csrfCookie = csrfResponse.getResponse().getCookie("XSRF-TOKEN");
+                String csrfToken = objectMapper.readTree(csrfResponse.getResponse().getContentAsString())
+                                .get("token").stringValue();
+                String clientIp = "192.0.2." + (10 + Math.abs(email.hashCode() % 200));
+
+                for (int attempt = 0; attempt < 5; attempt++) {
+                        mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                        .with(request -> {
+                                                request.setRemoteAddr(clientIp);
+                                                return request;
+                                        })
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}".formatted(email)))
+                                        .andExpect(status().isUnauthorized());
+                }
+
+                mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                .with(request -> {
+                                        request.setRemoteAddr(clientIp);
+                                        return request;
+                                })
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isTooManyRequests())
+                                .andExpect(jsonPath("$.error").value("Too many login attempts"));
+
+                mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                .with(request -> {
+                                        request.setRemoteAddr("192.0.2.250");
+                                        return request;
+                                })
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isTooManyRequests());
         }
 
         @Test
@@ -237,16 +271,19 @@ class AuthControllerIntegrationTests {
                                 .cookie(refreshCookie))
                                 .andExpect(status().isUnauthorized());
 
-                mockMvc.perform(withCsrf(post("/v1/auth/refresh"), csrfCookie, csrfToken)
-                                .cookie(rotatedRefreshCookie))
-                                .andExpect(status().isUnauthorized());
+                MvcResult refreshAfterReplay = mockMvc.perform(
+                                withCsrf(post("/v1/auth/refresh"), csrfCookie, csrfToken)
+                                                .cookie(rotatedRefreshCookie))
+                                .andExpect(status().isOk())
+                                .andReturn();
+                Cookie newestRefreshCookie = refreshAfterReplay.getResponse().getCookie("refreshToken");
 
                 mockMvc.perform(withCsrf(post("/v1/auth/logout"), csrfCookie, csrfToken)
-                                .cookie(rotatedRefreshCookie))
+                                .cookie(newestRefreshCookie))
                                 .andExpect(status().isNoContent());
 
                 mockMvc.perform(withCsrf(post("/v1/auth/refresh"), csrfCookie, csrfToken)
-                                .cookie(rotatedRefreshCookie))
+                                .cookie(newestRefreshCookie))
                                 .andExpect(status().isUnauthorized());
 
                 mockMvc.perform(options("/v1/users/me")
@@ -255,7 +292,9 @@ class AuthControllerIntegrationTests {
                                 .header("Access-Control-Request-Headers", "content-type,x-xsrf-token"))
                                 .andExpect(status().isOk())
                                 .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
-                                                .string("Access-Control-Allow-Credentials", "true"));
+                                                .string("Access-Control-Allow-Credentials", "true"))
+                                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                                                .string("Access-Control-Max-Age", "3600"));
         }
 
         @Test
