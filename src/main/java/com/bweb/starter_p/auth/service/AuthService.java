@@ -83,7 +83,7 @@ public class AuthService {
     UserAccount user = userRepository.findByEmail(email)
         .filter(UserAccount::isActive)
         .orElseThrow(() -> new BadCredentialsException("Invalid email or password"));
-    loginAttemptLimiter.clearEmailFailures(email);
+    loginAttemptLimiter.clearFailures(remoteAddress, email);
     return transactionTemplate.execute(status -> issueTokens(user));
   }
 

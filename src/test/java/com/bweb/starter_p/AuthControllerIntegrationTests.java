@@ -205,6 +205,55 @@ class AuthControllerIntegrationTests {
         }
 
         @Test
+        void successfulLoginClearsIpAndEmailFailures() throws Exception {
+                String email = "clear-ip-limit-" + UUID.randomUUID() + "@example.com";
+                MvcResult csrfResponse = mockMvc.perform(get("/v1/auth/csrf"))
+                                .andExpect(status().isOk())
+                                .andReturn();
+                Cookie csrfCookie = csrfResponse.getResponse().getCookie("XSRF-TOKEN");
+                String csrfToken = objectMapper.readTree(csrfResponse.getResponse().getContentAsString())
+                                .get("token").stringValue();
+                mockMvc.perform(withCsrf(post("/v1/auth/register"), csrfCookie, csrfToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"StrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isCreated());
+
+                String remoteAddress = "203.0.113.77";
+                for (int attempt = 0; attempt < 4; attempt++) {
+                        mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                        .with(request -> {
+                                                request.setRemoteAddr(remoteAddress);
+                                                return request;
+                                        })
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}"
+                                                        .formatted(email)))
+                                        .andExpect(status().isUnauthorized());
+                }
+
+                mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                .with(request -> {
+                                        request.setRemoteAddr(remoteAddress);
+                                        return request;
+                                })
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"email\":\"%s\",\"password\":\"StrongPassword123\"}".formatted(email)))
+                                .andExpect(status().isOk());
+
+                for (int attempt = 0; attempt < 4; attempt++) {
+                        mockMvc.perform(withCsrf(post("/v1/auth/login"), csrfCookie, csrfToken)
+                                        .with(request -> {
+                                                request.setRemoteAddr(remoteAddress);
+                                                return request;
+                                        })
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content("{\"email\":\"%s\",\"password\":\"WrongPassword123\"}"
+                                                        .formatted(email)))
+                                        .andExpect(status().isUnauthorized());
+                }
+        }
+
+        @Test
         void passwordsOverBcryptByteLimitReturnBadRequest() throws Exception {
                 MvcResult csrfResponse = mockMvc.perform(get("/v1/auth/csrf"))
                                 .andExpect(status().isOk())

@@ -34,7 +34,8 @@ public class LoginAttemptLimiter {
     increment(emailKey(email), MAX_FAILED_ATTEMPTS_PER_EMAIL, now);
   }
 
-  public synchronized void clearEmailFailures(String email) {
+  public synchronized void clearFailures(String remoteAddress, String email) {
+    attempts.remove(ipKey(remoteAddress));
     attempts.remove(emailKey(email));
   }
 
