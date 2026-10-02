@@ -29,10 +29,10 @@ public class UserService {
   public UserResponse updateCurrentUser(UUID userId, UpdateUserRequest request) {
     UserAccount user = findUser(userId);
     if (request.firstName() != null) {
-      user.setFirstName(request.firstName().trim());
+      user.setFirstName(normalizeOptionalName(request.firstName()));
     }
     if (request.lastName() != null) {
-      user.setLastName(request.lastName().trim());
+      user.setLastName(normalizeOptionalName(request.lastName()));
     }
     return UserResponse.from(user);
   }
@@ -41,5 +41,9 @@ public class UserService {
     return userRepository.findById(userId)
         .filter(UserAccount::isActive)
         .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+  }
+
+  private String normalizeOptionalName(String name) {
+    return name.isBlank() ? null : name.trim();
   }
 }

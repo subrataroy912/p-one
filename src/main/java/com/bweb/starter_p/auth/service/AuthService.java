@@ -15,6 +15,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -39,29 +40,33 @@ public class AuthService {
   private final AuthenticationManager authenticationManager;
   private final PasswordEncoder passwordEncoder;
   private final JwtService jwtService;
+  private final TransactionTemplate transactionTemplate;
 
-  @Transactional
   public AuthResult register(RegisterRequest request) {
     String email = normalizeEmail(request.email());
-    if (userRepository.existsByEmailIgnoreCase(email)) {
+    validatePasswordByteLength(request.password());
+    if (userRepository.existsByEmail(email)) {
       throw new ResponseStatusException(HttpStatus.CONFLICT, "Email is already registered");
     }
 
-    UserAccount user = new UserAccount();
-    user.setEmail(email);
-    user.setFirstName(normalizeOptionalName(request.firstName()));
-    user.setLastName(normalizeOptionalName(request.lastName()));
-    user.setPasswordHash(passwordEncoder.encode(request.password()));
-    try {
-      userRepository.saveAndFlush(user);
-    } catch (DataIntegrityViolationException exception) {
-      throw new ResponseStatusException(HttpStatus.CONFLICT, "Email is already registered");
-    }
-    return issueTokens(user);
+    String passwordHash = passwordEncoder.encode(request.password());
+    return transactionTemplate.execute(status -> {
+      UserAccount user = new UserAccount();
+      user.setEmail(email);
+      user.setFirstName(normalizeOptionalName(request.firstName()));
+      user.setLastName(normalizeOptionalName(request.lastName()));
+      user.setPasswordHash(passwordHash);
+      try {
+        userRepository.saveAndFlush(user);
+      } catch (DataIntegrityViolationException exception) {
+        throw new ResponseStatusException(HttpStatus.CONFLICT, "Email is already registered");
+      }
+      return issueTokens(user);
+    });
   }
 
-  @Transactional
   public AuthResult login(LoginRequest request) {
+    validatePasswordByteLength(request.password());
     String email = normalizeEmail(request.email());
     try {
       authenticationManager.authenticate(
@@ -69,13 +74,13 @@ public class AuthService {
     } catch (AuthenticationException exception) {
       throw new BadCredentialsException("Invalid email or password");
     }
-    UserAccount user = userRepository.findByEmailIgnoreCase(email)
+    UserAccount user = userRepository.findByEmail(email)
         .filter(UserAccount::isActive)
         .orElseThrow(() -> new BadCredentialsException("Invalid email or password"));
-    return issueTokens(user);
+    return transactionTemplate.execute(status -> issueTokens(user));
   }
 
-  @Transactional
+  @Transactional(noRollbackFor = BadCredentialsException.class)
   public AuthResult refresh(String rawRefreshToken) {
     String userId;
     try {
@@ -92,10 +97,16 @@ public class AuthService {
     }
 
     String tokenHash = hashToken(rawRefreshToken);
-    RefreshToken storedToken = refreshTokenRepository.findActiveForUpdate(tokenHash)
-        .filter(token -> token.getExpiresAt().isAfter(Instant.now()))
+    RefreshToken storedToken = refreshTokenRepository.findByTokenHashForUpdate(tokenHash)
         .filter(token -> token.getUser().getId().equals(parsedUserId))
         .orElseThrow(() -> new BadCredentialsException("Invalid refresh token"));
+    if (storedToken.getRevokedAt() != null) {
+      refreshTokenRepository.revokeAllActiveForUser(parsedUserId, Instant.now());
+      throw new BadCredentialsException("Invalid refresh token");
+    }
+    if (!storedToken.getExpiresAt().isAfter(Instant.now())) {
+      throw new BadCredentialsException("Invalid refresh token");
+    }
     UserAccount user = storedToken.getUser();
     if (!user.isActive()) {
       throw new BadCredentialsException("Invalid refresh token");
@@ -144,5 +155,11 @@ public class AuthService {
 
   private String normalizeOptionalName(String name) {
     return name == null || name.isBlank() ? null : name.trim();
+  }
+
+  private void validatePasswordByteLength(String password) {
+    if (password.getBytes(StandardCharsets.UTF_8).length > 72) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Password must be at most 72 UTF-8 bytes");
+    }
   }
 }

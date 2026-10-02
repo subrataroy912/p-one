@@ -5,8 +5,8 @@
         </encoder>
     </appender>
 
-    <!-- Reduce noise from Spring frameworks -->
-    <logger name="org.springframework" level="WARN"/>
+    <!-- Keep startup details visible while limiting ORM noise. -->
+    <logger name="org.springframework" level="INFO"/>
     <logger name="org.hibernate" level="WARN"/>
 
     <root level="INFO">

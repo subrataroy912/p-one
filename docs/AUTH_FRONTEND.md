@@ -10,6 +10,8 @@ Set the frontend API base URL to the backend origin, without a trailing slash. F
 VITE_API_BASE_URL=http://localhost:8080
 ```
 
+For a local backend setup, copy `.env.example` to `.env`, set the database credentials and a private random `JWT_SECRET` of at least 32 bytes, and ensure the `starter_p` database exists. Schema changes are applied by Flyway; Hibernate validates the resulting schema at startup.
+
 The backend must allow the exact frontend origin, including scheme and port. Local defaults allow `http://localhost:3000` and `http://localhost:5173`. For another port or a deployed frontend, set the backend environment variable:
 
 ```env
@@ -24,6 +26,7 @@ APP_COOKIE_SAME_SITE=None
 ```
 
 For local HTTP development, the backend defaults are `APP_COOKIE_SECURE=false` and `APP_COOKIE_SAME_SITE=Lax`. A same-site deployment can generally use `Lax` with secure cookies enabled.
+`APP_COOKIE_SAME_SITE=None` requires `APP_COOKIE_SECURE=true`; the backend fails startup with a configuration error otherwise.
 
 ## Cookie And CSRF Behavior
 
@@ -148,7 +151,7 @@ if (refreshed.ok) {
 }
 ```
 
-Log out with a CSRF-protected request. The backend revokes the current refresh token and clears both auth cookies:
+Log out with a CSRF-protected request. The backend revokes the current refresh token and clears both auth cookies. An already-issued access token remains valid until its short expiry (15 minutes by default):
 
 ```js
 const response = await apiFetch("/v1/auth/logout", { method: "POST" });
@@ -158,6 +161,9 @@ if (response.status === 204) {
 ```
 
 Refresh tokens rotate on successful refresh. Reuse of a rotated refresh cookie is rejected, so always let the browser accept the newest `Set-Cookie` response and do not cache refresh tokens in frontend code.
+If a known refresh token is replayed after rotation, all active refresh tokens for that account are revoked. Expired refresh-token records are removed daily.
+
+`PATCH /v1/users/me` leaves a name unchanged when its field is omitted or `null`. Send an empty or whitespace-only string to clear a name.
 
 ## Available User Endpoints
 
@@ -173,7 +179,7 @@ Refresh tokens rotate on successful refresh. Reuse of a rotated refresh cookie i
 
 ## Common Responses
 
-- `400 Bad Request`: request validation failed, such as an invalid email or a password shorter than 8 characters during registration.
+- `400 Bad Request`: request validation failed, such as an invalid email, a password shorter than 8 characters during registration, or a password exceeding BCrypt's 72-byte UTF-8 limit.
 - `401 Unauthorized`: invalid login credentials, invalid/expired refresh token, or missing/expired access authentication for a protected route.
 - `403 Forbidden`: missing or invalid CSRF token on a state-changing request. Bootstrap again with `GET /v1/auth/csrf` and retry once if appropriate.
 - `409 Conflict`: registration email is already in use.

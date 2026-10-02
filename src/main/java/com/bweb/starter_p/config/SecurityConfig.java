@@ -2,7 +2,6 @@ package com.bweb.starter_p.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Arrays;
 import java.util.List;
 
@@ -26,21 +25,23 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import com.bweb.starter_p.auth.service.JwtService;
 import com.bweb.starter_p.security.JwtAuthenticationFilter;
+import com.bweb.starter_p.user.repository.UserRepository;
 
-import lombok.RequiredArgsConstructor;
+import jakarta.servlet.DispatcherType;
 
 @Configuration
-@RequiredArgsConstructor
 public class SecurityConfig {
-
-  private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
   @Bean
   SecurityFilterChain securityFilterChain(
       HttpSecurity http,
       CsrfTokenRepository csrfTokenRepository,
-      CorsConfigurationSource corsConfigurationSource) throws Exception {
+      CorsConfigurationSource corsConfigurationSource,
+      JwtService jwtService,
+      UserRepository userRepository) throws Exception {
+    JwtAuthenticationFilter jwtAuthenticationFilter = new JwtAuthenticationFilter(jwtService, userRepository);
     return http
         .csrf(csrf -> csrf.csrfTokenRepository(csrfTokenRepository))
         .cors(cors -> cors.configurationSource(corsConfigurationSource))
@@ -48,6 +49,7 @@ public class SecurityConfig {
         .httpBasic(AbstractHttpConfigurer::disable)
         .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
         .authorizeHttpRequests(authorize -> authorize
+            .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
             .requestMatchers(HttpMethod.GET, "/v1/auth/csrf").permitAll()
             .requestMatchers(HttpMethod.GET, "/v1/health/alive").permitAll()
             .requestMatchers("/v1/auth/register", "/v1/auth/login", "/v1/auth/refresh", "/v1/auth/logout").permitAll()
@@ -63,6 +65,10 @@ public class SecurityConfig {
   CsrfTokenRepository csrfTokenRepository(
       @Value("${app.security.cookie-secure}") boolean secure,
       @Value("${app.security.cookie-same-site}") String sameSite) {
+    if (!secure && "None".equalsIgnoreCase(sameSite)) {
+      throw new IllegalStateException(
+          "APP_COOKIE_SECURE must be true when APP_COOKIE_SAME_SITE=None");
+    }
     CookieCsrfTokenRepository repository = CookieCsrfTokenRepository.withHttpOnlyFalse();
     repository.setHeaderName("X-XSRF-TOKEN");
     repository.setCookieCustomizer(cookie -> cookie
@@ -92,11 +98,6 @@ public class SecurityConfig {
   @Bean
   PasswordEncoder passwordEncoder() {
     return new BCryptPasswordEncoder();
-  }
-
-  @Bean
-  ObjectMapper objectMapper() {
-    return new ObjectMapper().findAndRegisterModules();
   }
 
   @Bean

@@ -9,7 +9,7 @@ import com.bweb.starter_p.user.entity.UserAccount;
 
 public interface UserRepository extends JpaRepository<UserAccount, UUID> {
 
-  Optional<UserAccount> findByEmailIgnoreCase(String email);
+  Optional<UserAccount> findByEmail(String email);
 
-  boolean existsByEmailIgnoreCase(String email);
+  boolean existsByEmail(String email);
 }
